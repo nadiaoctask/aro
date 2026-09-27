@@ -1,69 +1,91 @@
-import Image from "next/image";
+import type { Metadata } from "next";
+import { Inter } from "next/font/google";
+import "./globals.css";
+import Link from "next/link";
+import { LayoutDashboard, Database, Truck, ShieldAlert, Calculator } from "lucide-react";
 
-export default function Home() {
+const inter = Inter({ subsets: ["latin"] });
+
+export const metadata: Metadata = {
+  title: "Automated Replenishment Optimization",
+  description: "built for Medan Distribusindo Raya",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
+    <html lang="en">
+      <body className={`${inter.className} bg-[#f0f2f5] text-slate-800 flex min-h-screen`}>
+        
+        {/* Sidebar */}
+        <aside className="w-64 bg-white border-r border-slate-200 flex flex-col fixed h-full z-10 shadow-sm">
+          {/* Logo Area */}
+          <div className="h-20 flex items-center justify-center border-b border-slate-100">
+            <img 
+              src="/logo Wings.svg" 
+              alt="Logo Wings" 
+              className="h-12 w-auto object-contain"
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+          </div>
+
+          {/* Navigation */}
+          <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
+            <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 mt-4 ml-3">
+              Master Data
+            </div>
+            
+            <Link href="/material" className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-600 hover:bg-slate-50 transition-colors">
+              <Database size={18} />
+              <span className="font-semibold text-sm">Data Material</span>
+            </Link>
+            
+            <Link href="/safety-stock" className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-600 hover:bg-slate-50 transition-colors">
+              <ShieldAlert size={18} />
+              <span className="font-semibold text-sm">Data Safety Stock</span>
+            </Link>
+
+            <Link href="/fleet" className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-slate-600 hover:bg-slate-50 transition-colors">
+              <Truck size={18} />
+              <span className="font-semibold text-sm">Data Fleet</span>
+            </Link>
+
+            <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 mt-8 ml-3">
+              Operations
+            </div>
+
+            {/* Menu Aktif (Contoh Style Biru Gelap) */}
+            <Link href="/replenishment" className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-[#114b79] text-white shadow-md transition-colors">
+              <Calculator size={18} />
+              <span className="font-semibold text-sm">Replenishment</span>
+            </Link>
+          </nav>
+
+          {/* User Profile Area */}
+          <div className="p-4 border-t border-slate-100 flex items-center gap-3">
+            <div className="w-10 h-10 rounded-full bg-[#114b79] text-white flex items-center justify-center font-bold">
+              ADM
+            </div>
+            <div>
+              <p className="text-sm font-bold">Admin SCM</p>
+              <p className="text-xs text-slate-500">Supervisor</p>
+            </div>
+          </div>
+        </aside>
+
+        {/* Main Content Area */}
+        <main className="flex-1 ml-64 p-8">
+          {/* Top Header Placeholder */}
+          <header className="mb-8 flex justify-between items-end border-b border-slate-300 pb-4">
+            <h2 className="text-3xl font-extrabold text-[#114b79]">Automated Replenishment Optimization</h2>
+          </header>
+          
+          {children}
+        </main>
+
+      </body>
+    </html>
   );
 }
