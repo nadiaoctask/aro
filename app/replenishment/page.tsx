@@ -1,12 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
-import { Calculator, Download, ArrowRight } from "lucide-react";
+import { Calculator, Download, ArrowRight, Plus, AlertCircle } from "lucide-react";
 import * as XLSX from "xlsx";
 import { useRouter } from "next/navigation";
 
-// Tipe data untuk hasil kalkulasi
 interface CalculatedResult {
   material_id: string;
   description: string;
@@ -14,29 +13,67 @@ interface CalculatedResult {
   blocked_stock: number;
   x_days: number;
   safety_stock: number;
-  transferred_stock: number;
+  transferred_stock_box: number; 
+  max_transfer_box: number; 
+  min_transfer_box_limit: number; // Syarat MOQ
   status: string;
   statusColor: string;
+  isManual?: boolean;
 }
 
 export default function ReplenishmentPage() {
   const router = useRouter();
   
-  // State Input Parameter
   const [workDays, setWorkDays] = useState<number | "">("");
   const [replenishDays, setReplenishDays] = useState<number | "">("");
 
-  // State File Excel
   const [fileZRW29, setFileZRW29] = useState<File | null>(null);
   const [fileZRW12, setFileZRW12] = useState<File | null>(null);
   const [fileSales, setFileSales] = useState<File | null>(null);
 
-  // State Proses & Hasil
+  const [allMaterials, setAllMaterials] = useState<any[]>([]); 
+  const [stockA002Map, setStockA002Map] = useState<Record<string, number>>({});
+  
   const [isCalculating, setIsCalculating] = useState(false);
   const [isTransferring, setIsTransferring] = useState(false);
   const [results, setResults] = useState<CalculatedResult[]>([]);
 
-  // Utility untuk membaca Excel menjadi Array 2 Dimensi
+  const [manualMid, setManualMid] = useState("");
+  const [manualQtyBox, setManualQtyBox] = useState("");
+
+  useEffect(() => {
+    fetchMasterMaterials();
+  }, []);
+
+  const fetchMasterMaterials = async () => {
+    try {
+      let allData: any[] = [];
+      let from = 0;
+      const step = 1000;
+      let hasMore = true;
+      
+      while (hasMore) {
+        const { data, error } = await supabase
+          .from("material")
+          .select("material_id, description, pcs_per_pal, pcs_per_box")
+          .range(from, from + step - 1);
+          
+        if (error) throw error;
+        
+        if (data && data.length > 0) {
+          allData = [...allData, ...data];
+          from += step;
+          if (data.length < step) hasMore = false;
+        } else {
+          hasMore = false;
+        }
+      }
+      setAllMaterials(allData);
+    } catch (err) {
+      console.error("Gagal memuat material master:", err);
+    }
+  };
+
   const readExcel = (file: File): Promise<any[][]> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -54,6 +91,9 @@ export default function ReplenishmentPage() {
       reader.readAsArrayBuffer(file);
     });
   };
+
+  // Pembersih MID: Hapus spasi dan nol di depan agar tidak miss-match
+  const cleanMid = (val: any) => String(val || "").replace(/^0+/, '').trim().toUpperCase();
 
   const handleCalculate = async () => {
     if (!fileZRW29 || !fileZRW12 || !fileSales || !workDays || !replenishDays) {
@@ -74,23 +114,23 @@ export default function ReplenishmentPage() {
       const zrw29Data = zrw29Raw.slice(1); 
       const zrw12Data = zrw12Raw.slice(1); 
 
-      const { data: dbMaterials } = await supabase.from("material").select("material_id, description");
       const { data: dbSafetyStocks } = await supabase.from("safety_stock").select("material_id, safety_stock");
       
-      const masterMaterialMap = new Map(dbMaterials?.map((m) => [m.material_id, m.description]));
-      const masterSafetyMap = new Map(dbSafetyStocks?.map((s) => [s.material_id, s.safety_stock]));
+      const masterMaterialMap = new Map(allMaterials.map((m) => [cleanMid(m.material_id), m]));
+      const masterSafetyMap = new Map(dbSafetyStocks?.map((s) => [cleanMid(s.material_id), s.safety_stock]));
 
       const stockA001: Record<string, number> = {};
       const blockedA001: Record<string, number> = {};
       const existA001: Record<string, boolean> = {};
 
+      // PENTING: Gunakan penambahan (+) untuk mengakumulasi jika 1 material punya banyak Batch/Row
       zrw29Data.forEach(row => {
         if (!row || row.length === 0) return;
-        const mid = String(row[0] || "").trim();
+        const mid = cleanMid(row[0]);
         if (mid) {
           existA001[mid] = true;
-          stockA001[mid] = parseFloat(row[6]) || 0;
-          blockedA001[mid] = parseFloat(row[10]) || 0;
+          stockA001[mid] = (stockA001[mid] || 0) + (parseFloat(row[6]) || 0);
+          blockedA001[mid] = (blockedA001[mid] || 0) + (parseFloat(row[10]) || 0);
         }
       });
 
@@ -99,18 +139,22 @@ export default function ReplenishmentPage() {
 
       zrw12Data.forEach(row => {
         if (!row || row.length === 0) return;
-        const mid = String(row[1] || "").trim();
+        const mid = cleanMid(row[1]);
         if (mid) {
           existA002[mid] = true;
-          stockA002[mid] = parseFloat(row[7]) || 0;
+          stockA002[mid] = (stockA002[mid] || 0) + (parseFloat(row[7]) || 0);
         }
       });
 
+      // Simpan Map A002 agar fitur Tambah Manual bisa mendeteksi Max Qty dengan akurat
+      setStockA002Map(stockA002);
+
       const outputData: CalculatedResult[] = [];
 
+      // Proses perbandingan data
       salesData.forEach(row => {
         if (!row || row.length === 0) return;
-        const mid = String(row[0] || "").trim();
+        const mid = cleanMid(row[0]);
         if (!mid) return;
 
         if (!masterMaterialMap.has(mid)) return;
@@ -119,7 +163,7 @@ export default function ReplenishmentPage() {
         const deliv2 = parseFloat(row[10]) || 0;
         const deliv3 = parseFloat(row[11]) || 0;
         const totaldeliv = deliv1 + deliv2 + deliv3;
-        const dailydeliv = totaldeliv / Number(workDays);
+        const dailydeliv = totaldeliv / Number(workDays); // Box per day
         
         const currentStockA001 = stockA001[mid] || 0;
         const currentBlockedA001 = blockedA001[mid] || 0;
@@ -129,39 +173,53 @@ export default function ReplenishmentPage() {
         const x_days = (dailydeliv > 0) ? (currentStockA001 / dailydeliv) : 999;
         
         if (x_days < 3) {
-          const reqDays = Math.ceil(dailydeliv * Number(replenishDays));
+          const reqDaysBox = Math.ceil(dailydeliv * Number(replenishDays));
           const currentStockA002 = stockA002[mid] || 0;
           
-          let transferQty = 0;
+          let transferQtyBox = 0;
           let status = "";
           let statusColor = "";
           
           if (!isExistA001 && !isExistA002) {
-            status = "Need Review SCM";
-            statusColor = "bg-[#fce5cd] text-[#b45f06]"; 
-            transferQty = 0;
+            status = "Perlu Review SCM";
+            statusColor = "bg-orange-50 text-orange-700 border border-orange-200"; 
+            transferQtyBox = 0;
           } else if (currentStockA002 === 0) {
-            status = "Zero stock left";
-            statusColor = "bg-[#f4cccc] text-[#cc0000]"; 
-            transferQty = 0;
-          } else if (currentStockA002 < reqDays) {
-            status = "Less than needed stock";
-            statusColor = "bg-[#fff2cc] text-[#b45f06]"; 
-            transferQty = currentStockA002; 
+            status = "Stok Kosong";
+            statusColor = "bg-red-50 text-red-700 border border-red-200"; 
+            transferQtyBox = 0;
+          } else if (currentStockA002 < reqDaysBox) {
+            status = "Stok Kurang";
+            statusColor = "bg-amber-50 text-amber-700 border border-amber-200"; 
+            transferQtyBox = currentStockA002; 
           } else {
-            status = "Sufficient";
-            statusColor = "bg-[#d9ead3] text-[#38761d]"; 
-            transferQty = reqDays;
+            status = "Stok Cukup";
+            statusColor = "bg-emerald-50 text-emerald-700 border border-emerald-200"; 
+            transferQtyBox = reqDaysBox;
+          }
+
+          const mat = masterMaterialMap.get(mid);
+          const pcs_per_pal = mat?.pcs_per_pal || 1;
+          const pcs_per_box = mat?.pcs_per_box || 1;
+          
+          // Syarat MOQ: Setengah Palet dalam Satuan Box
+          const min_transfer_boxes = Math.ceil((pcs_per_pal / pcs_per_box) / 2);
+          const maxBoxAvailable = currentStockA002;
+
+          if (transferQtyBox > maxBoxAvailable) {
+            transferQtyBox = maxBoxAvailable;
           }
           
           outputData.push({
             material_id: mid,
-            description: masterMaterialMap.get(mid) || "No Description",
+            description: mat.description || "No Description",
             available_stock: currentStockA001,
             blocked_stock: currentBlockedA001,
             x_days: Number(x_days.toFixed(2)),
             safety_stock: masterSafetyMap.get(mid) || 0,
-            transferred_stock: transferQty,
+            transferred_stock_box: transferQtyBox,
+            max_transfer_box: maxBoxAvailable,
+            min_transfer_box_limit: min_transfer_boxes,
             status: status,
             statusColor: statusColor
           });
@@ -179,34 +237,133 @@ export default function ReplenishmentPage() {
     setIsCalculating(false);
   };
 
-  // Logic Gabungan: Simpan ke DB -> Redirect ke Optimasi
+  const handleEditQty = (mid: string, newQtyBox: number) => {
+    setResults(prev => prev.map(r => {
+      if (r.material_id === mid) {
+        let validQty = newQtyBox < 0 ? 0 : newQtyBox;
+        
+        if (validQty > r.max_transfer_box) {
+          validQty = r.max_transfer_box;
+          alert(`Maksimal transfer untuk MID ${mid} adalah ${r.max_transfer_box} Box (Stok ZRW12)`);
+        }
+        
+        return {
+          ...r,
+          transferred_stock_box: validQty,
+          status: "Sesuai Permintaan",
+          statusColor: "bg-blue-50 text-[#114b79] border border-blue-200",
+          x_days: 0.1, 
+          isManual: true
+        };
+      }
+      return r;
+    }));
+  };
+
+  const manualMat = allMaterials.find(m => cleanMid(m.material_id) === cleanMid(manualMid));
+  const manualMaxBox = stockA002Map[cleanMid(manualMid)] || 0; 
+  
+  const manualPcsPerPal = manualMat?.pcs_per_pal || 1;
+  const manualPcsPerBox = manualMat?.pcs_per_box || 1;
+  const manualMinBoxLimit = Math.ceil((manualPcsPerPal / manualPcsPerBox) / 2);
+
+  const handleAddManual = () => {
+    if (Object.keys(stockA002Map).length === 0) {
+      return alert("Silakan Calculate Auto Replenishment dahulu agar sistem mengenali data ZRW12!");
+    }
+    
+    if (!manualMid || !manualQtyBox) return alert("Silakan isi MID dan Qty terlebih dahulu!");
+    if (!manualMat) return alert("MID tidak ditemukan di Master Material!");
+
+    const newQtyBox = Number(manualQtyBox);
+    
+    if (newQtyBox > manualMaxBox) {
+      return alert(`Gagal! Stok di ZRW12 (A002) hanya tersisa ${manualMaxBox} Box.`);
+    }
+    
+    setResults(prev => {
+      const existing = prev.find(r => r.material_id === cleanMid(manualMid));
+      if (existing) {
+        return prev.map(r => r.material_id === cleanMid(manualMid) ? {
+          ...r, 
+          transferred_stock_box: newQtyBox,
+          status: "Sesuai Permintaan",
+          statusColor: "bg-blue-50 text-[#114b79] border border-blue-200",
+          x_days: 0.1,
+          isManual: true
+        } : r);
+      } else {
+        return [{
+          material_id: cleanMid(manualMat.material_id),
+          description: manualMat.description,
+          available_stock: 0, 
+          blocked_stock: 0,
+          safety_stock: 0,
+          x_days: 0.1, 
+          transferred_stock_box: newQtyBox,
+          max_transfer_box: manualMaxBox,
+          min_transfer_box_limit: manualMinBoxLimit,
+          status: "Sesuai Permintaan",
+          statusColor: "bg-blue-50 text-[#114b79] border border-blue-200",
+          isManual: true
+        }, ...prev];
+      }
+    });
+
+    setManualMid("");
+    setManualQtyBox("");
+  };
+
   const handleTransfer = async () => {
-    if (results.length === 0) return;
+    const itemsToTransfer = results.filter(item => {
+      if (item.transferred_stock_box <= 0) return false;
+      if (item.isManual) return true;
+      return item.transferred_stock_box >= item.min_transfer_box_limit;
+    });
+
+    if (itemsToTransfer.length === 0) {
+      alert("Tidak ada material yang siap ditransfer (Semua Qty 0 atau di bawah MOQ 1/2 Palet).");
+      return;
+    }
+
+    const skippedCount = results.length - itemsToTransfer.length;
+    if (skippedCount > 0) {
+      const proceed = confirm(`Terdapat ${skippedCount} material yang akan DIABAIKAN karena Qty kurang dari MOQ (1/2 Palet).\n\nLanjut simpan ${itemsToTransfer.length} material valid ke database?`);
+      if (!proceed) return;
+    }
     
     setIsTransferring(true);
+    
     try {
-      // 1. Simpan Header Sesi
       const { data: sessionData, error: sessionError } = await supabase
         .from("replenishment")
         .insert([{ jml_hari_kerja: workDays, jml_hari_replenish: replenishDays }])
         .select("id_sesi")
         .single();
         
-      if (sessionError) throw sessionError;
+      if (sessionError) {
+        console.error(
+          "Session error:",
+          sessionError.code,
+          sessionError.message,
+          sessionError.details,
+          sessionError.hint
+        );
+
+        throw sessionError;
+      }
       const newSessionId = sessionData.id_sesi;
 
-      // 2. Siapkan Detail Data
-      const detailPayload = results.map(item => ({
+      const detailPayload = itemsToTransfer.map(item => ({
         id_sesi: newSessionId,
-        material_id: item.material_id,
-        available_stock: item.available_stock,
-        blocked_stock: item.blocked_stock,
-        x_days: item.x_days,
-        transferred_stock: item.transferred_stock,
-        status: item.status
+        material_id: String(item.material_id),
+        available_stock: Number(item.available_stock) || 0,
+        blocked_stock: Number(item.blocked_stock) || 0,
+        x_days: Number(item.x_days) || 0,
+        transferred_stock: Number(item.transferred_stock_box) || 0, 
+        status: String(item.isManual ? "Sesuai Permintaan" : item.status)
       }));
 
-      // 3. Simpan Detail secara Batch
       const chunkSize = 1000;
       for (let i = 0; i < detailPayload.length; i += chunkSize) {
         const chunk = detailPayload.slice(i, i + chunkSize);
@@ -214,18 +371,18 @@ export default function ReplenishmentPage() {
         if (detailError) throw detailError;
       }
 
-      // 4. Sukses tersimpan? Langsung pindah ke halaman Optimasi dengan membawa ID Sesi
       router.push(`/optimasi?session_id=${newSessionId}`);
 
     } catch (error: any) {
+      console.error("Error saat insert:", error);
       alert("Gagal memproses data ke database: " + error.message);
-      setIsTransferring(false);
+    } finally {
+      setIsTransferring(false); 
     }
   };
 
   const handleDownloadExcel = () => {
     if (results.length === 0) return;
-    
     const exportData = results.map(r => ({
       "MID": r.material_id,
       "Material Description": r.description,
@@ -233,10 +390,11 @@ export default function ReplenishmentPage() {
       "Blocked Stock (A001)": r.blocked_stock,
       "Safety Stock": r.safety_stock,
       "X-Days": r.x_days,
-      "Transferred Stock": r.transferred_stock,
+      "Transfer Qty (Box)": r.transferred_stock_box,
+      "Max ZRW12 (Box)": r.max_transfer_box,
+      "Syarat MOQ 1/2 Palet (Box)": r.min_transfer_box_limit,
       "Status": r.status
     }));
-
     const worksheet = XLSX.utils.json_to_sheet(exportData);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Replenishment Result");
@@ -244,113 +402,160 @@ export default function ReplenishmentPage() {
   };
 
   return (
-    <div className="space-y-6">
-      
-      {/* HEADER */}
-      <div className="bg-white rounded-lg shadow-md border border-slate-200 p-6 flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-extrabold text-[#114b79] uppercase tracking-wide flex items-center gap-2">
-            Automated Replenishment 
-          </h2>
-          <p className="text-sm text-slate-500 font-medium mt-1"></p>
-        </div>
-      </div>
-
+    <div className="w-full min-w-0 max-w-full space-y-6">    
       {/* INPUT FORM */}
-      <div className="bg-white rounded-lg shadow-md border border-slate-200 p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
-        
-        <div className="lg:col-span-1 space-y-4 border-r border-slate-100 pr-4">
+      <div className="w-full max-w-full min-w-0 bg-white rounded-lg shadow-sm border border-slate-200 p-6 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,4fr)] gap-6">
+        <div className="min-w-0 space-y-4 lg:border-r border-slate-100 lg:pr-4">
           <div>
-            <label className="block text-sm font-bold text-slate-700 mb-1.5">Jumlah Hari Kerja (3 Bulan)</label>
+            <label className="block text-sm font-bold text-slate-700 mb-1.5">Hari Kerja (3 Bulan)</label>
             <input type="number" value={workDays} onChange={(e) => setWorkDays(e.target.value ? Number(e.target.value) : "")} className="w-full border border-slate-300 rounded-md p-2 focus:ring-1 focus:ring-[#114b79] outline-none" placeholder="Misal: 80" />
           </div>
           <div>
-            <label className="block text-sm font-bold text-slate-700 mb-1.5">Kebutuhan Replenishment</label>
+            <label className="block text-sm font-bold text-slate-700 mb-1.5">Kebutuhan Replenish</label>
             <input type="number" value={replenishDays} onChange={(e) => setReplenishDays(e.target.value ? Number(e.target.value) : "")} className="w-full border border-slate-300 rounded-md p-2 focus:ring-1 focus:ring-[#114b79] outline-none" placeholder="Misal: 3" />
           </div>
         </div>
 
-        <div className="lg:col-span-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="border border-slate-300 p-4 rounded-md bg-slate-50 relative group hover:border-[#114b79] transition-all">
-            <h4 className="font-bold text-[#114b79] text-sm mb-1">ZRW29 A001</h4>
-            <p className="text-xs text-slate-500 mb-3">Upload Stok Gudang Utama</p>
-            <input type="file" accept=".xlsx, .xls" onChange={(e) => setFileZRW29(e.target.files?.[0] || null)} className="w-full text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-[#114b79] file:text-white hover:file:bg-[#0c3659] cursor-pointer" />
+        {/* Kotak Upload*/}
+        <div className="min-w-0 grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="border border-slate-300 p-4 rounded-md bg-slate-50 hover:border-[#114b79] transition-all min-w-0 overflow-hidden">
+            <h4 className="font-bold text-[#114b79] text-sm mb-1 truncate">ZRW29 A001</h4>
+            <p className="text-xs text-slate-500 mb-3 truncate">Upload Stok Gudang Utama</p>
+            <input type="file" accept=".xlsx, .xls" onChange={(e) => setFileZRW29(e.target.files?.[0] || null)} className="w-full max-w-full text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-[#114b79] file:text-white hover:file:bg-[#0c3659] cursor-pointer" />
           </div>
-          <div className="border border-slate-300 p-4 rounded-md bg-slate-50 relative group hover:border-[#114b79] transition-all">
-            <h4 className="font-bold text-[#114b79] text-sm mb-1">ZRW12 A002</h4>
-            <p className="text-xs text-slate-500 mb-3">Upload Stok Gudang Sewa</p>
-            <input type="file" accept=".xlsx, .xls" onChange={(e) => setFileZRW12(e.target.files?.[0] || null)} className="w-full text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-[#114b79] file:text-white hover:file:bg-[#0c3659] cursor-pointer" />
+          <div className="border border-slate-300 p-4 rounded-md bg-slate-50 hover:border-[#114b79] transition-all min-w-0 overflow-hidden">
+            <h4 className="font-bold text-[#114b79] text-sm mb-1 truncate">ZRW12 A002</h4>
+            <p className="text-xs text-slate-500 mb-3 truncate">Upload Stok Gudang Sewa</p>
+            <input type="file" accept=".xlsx, .xls" onChange={(e) => setFileZRW12(e.target.files?.[0] || null)} className="w-full max-w-full text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-[#114b79] file:text-white hover:file:bg-[#0c3659] cursor-pointer" />
           </div>
-          <div className="border border-slate-300 p-4 rounded-md bg-slate-50 relative group hover:border-[#114b79] transition-all">
-            <h4 className="font-bold text-[#114b79] text-sm mb-1">Data Delivery</h4>
-            <p className="text-xs text-slate-500 mb-3">Upload Data DO 3 Bulan Terakhir</p>
-            <input type="file" accept=".xlsx, .xls" onChange={(e) => setFileSales(e.target.files?.[0] || null)} className="w-full text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-[#114b79] file:text-white hover:file:bg-[#0c3659] cursor-pointer" />
+          <div className="border border-slate-300 p-4 rounded-md bg-slate-50 hover:border-[#114b79] transition-all min-w-0 overflow-hidden">
+            <h4 className="font-bold text-[#114b79] text-sm mb-1 truncate">Data Delivery</h4>
+            <p className="text-xs text-slate-500 mb-3 truncate">Upload DO 3 Bulan Terakhir</p>
+            <input type="file" accept=".xlsx, .xls" onChange={(e) => setFileSales(e.target.files?.[0] || null)} className="w-full max-w-full text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-[#114b79] file:text-white hover:file:bg-[#0c3659] cursor-pointer" />
           </div>
         </div>
 
-        <div className="lg:col-span-5 pt-4 border-t border-slate-200">
+        <div className="col-span-full pt-4 border-t border-slate-200">
           <button onClick={handleCalculate} disabled={isCalculating} className="w-full py-3.5 bg-[#114b79] text-white font-bold rounded-md hover:bg-[#0c3659] transition-colors shadow-sm disabled:bg-slate-400 flex justify-center items-center gap-2">
             <Calculator size={20} />
-            {isCalculating ? "Menghitung & Memproses Data..." : "Calculate"}
+            {isCalculating ? "Menghitung Kebutuhan..." : "Calculate"}
           </button>
         </div>
       </div>
 
-      {/* HASIL KALKULASI & ACTION BUTTONS */}
+      {/* HASIL KALKULASI */}
       {results.length > 0 && (
-        <div className="bg-white rounded-lg shadow-md border border-slate-200 p-6 space-y-4">
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-slate-200 pb-4 gap-4">
-            <div>
+        <div className="w-full min-w-0 max-w-full bg-white rounded-lg shadow-sm border border-slate-200 p-6 space-y-4 overflow-hidden">       
+          <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center border-b border-slate-200 pb-4 gap-4 min-w-0">
+            <div className="min-w-0">
               <h3 className="text-lg font-extrabold text-[#114b79] uppercase">Hasil Kalkulasi</h3>
-              <p className="text-sm text-slate-500 font-medium">Ditemukan {results.length} material yang perlu direplenish (X-Days {'<'} 3).</p>
+              <p className="text-sm text-slate-500 font-medium truncate">Ditemukan <span className="font-bold text-slate-700">{results.length}</span> material yang perlu direplenish.</p>
             </div>
             
-            {/* Action Buttons: Cuma 2 Tombol, Download dan Transfer */}
-            <div className="flex gap-3">
-              <button onClick={handleDownloadExcel} className="flex items-center gap-2 px-5 py-2.5 bg-[#3b824a] text-white font-bold rounded-md hover:bg-[#2e663a] transition-colors shadow-sm">
+            <div className="flex flex-wrap gap-3">
+              <button onClick={handleDownloadExcel} className="flex items-center gap-2 px-5 py-2 bg-[#3b824a] text-white font-bold rounded-md hover:bg-[#2e663a] transition-colors shadow-sm">
                 <Download size={18} /> Download Excel
               </button>
               
-              <button onClick={handleTransfer} disabled={isTransferring} className="flex items-center gap-2 px-5 py-2.5 bg-[#114b79] text-white font-bold rounded-md hover:bg-[#0c3659] transition-colors shadow-sm disabled:bg-slate-400">
+              <button onClick={handleTransfer} disabled={isTransferring} className="flex items-center gap-2 px-5 py-2 bg-[#114b79] text-white font-bold rounded-md hover:bg-[#0c3659] transition-colors shadow-sm disabled:bg-slate-400">
                 {isTransferring ? "Memproses Data..." : "Transfer"} <ArrowRight size={18} />
               </button>
             </div>
           </div>
 
-          <div className="border border-slate-300 rounded-md overflow-hidden max-h-[500px] overflow-y-auto">
-            <table className="w-full text-sm text-left border-collapse">
-              <thead className="text-xs text-white uppercase bg-[#114b79] sticky top-0 z-10 text-center">
+          {/* FITUR TAMBAH MANUAL */}
+          <div className="w-full min-w-0 max-w-full bg-slate-50 border border-slate-200 rounded-lg p-4 grid grid-cols-1 md:grid-cols-12 gap-4 items-end shadow-sm">
+            <div className="md:col-span-4 min-w-0">
+              <label className="block text-xs font-bold text-[#114b79] mb-1">Tambah Material Manual</label>
+              <input type="text" value={manualMid} onChange={(e) => setManualMid(e.target.value.toUpperCase())} placeholder="Ketik MID (Misal: 1080888)" className="w-full border border-slate-300 rounded p-2 text-sm focus:ring-1 focus:ring-[#114b79] outline-none uppercase font-medium" />
+            </div>
+            
+            <div className="md:col-span-3 relative min-w-0">
+              <label className="block text-xs font-bold text-[#114b79] mb-1">Qty (BOX)</label>
+              <input type="number" value={manualQtyBox} onChange={(e) => setManualQtyBox(e.target.value)} placeholder="0" className="w-full border border-slate-300 rounded p-2 text-sm focus:ring-1 focus:ring-[#114b79] outline-none font-medium" />
+              {manualMid.trim() !== "" && Object.keys(stockA002Map).length > 0 && (
+                <p className="absolute -bottom-5 left-0 text-[10px] font-bold text-slate-500 whitespace-nowrap">
+                  Max: <span className="text-amber-600">{manualMaxBox} Box</span>
+                </p>
+              )}
+            </div>
+            
+            <div className="md:col-span-2 min-w-0">
+              <button onClick={handleAddManual} className="w-full py-2 bg-[#114b79] text-white font-bold rounded hover:bg-[#0c3659] transition-colors flex items-center justify-center gap-2 text-sm shadow-sm h-[38px]">
+                <Plus size={16} /> Tambah
+              </button>
+            </div>
+            
+            <div className="md:col-span-3 min-w-0 flex items-center justify-center gap-1.5 text-xs text-slate-500 font-bold bg-white px-3 py-2 rounded border border-slate-200 shadow-sm h-[38px]">
+              <AlertCircle size={14} className="text-[#114b79]" /> Terkunci Prioritas
+            </div>
+          </div>
+
+          {/* 2. TABEL HASIL KALKULASI */}
+          <div className="w-full min-w-0 max-w-full overflow-x-auto overflow-y-auto border border-slate-300 rounded-md max-h-[500px]">
+            <table className="min-w-[1000px] w-full text-sm text-left border-collapse">
+              <thead className="text-xs text-white uppercase bg-[#114b79] sticky top-0 z-10 text-center shadow-sm">
                 <tr>
-                  <th className="px-4 py-3 border-r border-[#0c3659]">MID</th>
-                  <th className="px-4 py-3 border-r border-[#0c3659] text-left">Description</th>
-                  <th className="px-4 py-3 border-r border-[#0c3659]">Avail (A001)</th>
-                  <th className="px-4 py-3 border-r border-[#0c3659]">Block (A001)</th>
-                  <th className="px-4 py-3 border-r border-[#0c3659]">Safety</th>
-                  <th className="px-4 py-3 border-r border-[#0c3659]">X-Days</th>
-                  <th className="px-4 py-3 border-r border-[#0c3659]">Transfer Qty</th>
-                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3 border-r border-[#0c3659] whitespace-nowrap">MID</th>
+                  <th className="px-4 py-3 border-r border-[#0c3659] text-left whitespace-nowrap">Description</th>
+                  <th className="px-4 py-3 border-r border-[#0c3659] whitespace-nowrap">Available Stock</th>
+                  <th className="px-4 py-3 border-r border-[#0c3659] whitespace-nowrap">Blocked Stock</th>
+                  <th className="px-4 py-3 border-r border-[#0c3659] whitespace-nowrap">Safety Stock</th>
+                  <th className="px-4 py-3 border-r border-[#0c3659] whitespace-nowrap">X-Days</th>
+                  <th className="px-4 py-3 border-r border-[#0c3659] bg-[#092942] whitespace-nowrap">Transfer Qty (Box)</th>
+                  <th className="px-4 py-3 whitespace-nowrap">Status</th>
                 </tr>
               </thead>
               <tbody className="text-slate-700">
                 {results.map((r, index) => (
-                  <tr key={r.material_id} className={`border-b border-slate-200 ${index % 2 === 0 ? 'bg-white' : 'bg-slate-50'} hover:bg-blue-50`}>
-                    <td className="px-4 py-2 font-bold text-center">{r.material_id}</td>
-                    <td className="px-4 py-2 whitespace-nowrap">{r.description}</td>
-                    <td className="px-4 py-2 text-center">{r.available_stock}</td>
-                    <td className="px-4 py-2 text-center text-red-600">{r.blocked_stock}</td>
-                    <td className="px-4 py-2 text-center">{r.safety_stock}</td>
-                    <td className="px-4 py-2 text-center font-bold text-[#114b79]">{r.x_days}</td>
-                    <td className="px-4 py-2 text-center font-bold text-[#3b824a]">{r.transferred_stock}</td>
-                    <td className="px-4 py-2 text-center">
-                      <span className={`px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap ${r.statusColor}`}>
+                  <tr key={r.material_id} className={`border-b border-slate-200 ${r.isManual ? 'bg-blue-50/50' : (index % 2 === 0 ? 'bg-white' : 'bg-slate-50')} hover:bg-slate-100 transition-colors`}>
+                    
+                    <td className="px-4 py-2 font-bold text-center border-r border-slate-100 whitespace-nowrap">{r.material_id}</td>
+                    
+                    <td className="px-4 py-2 border-r border-slate-100">
+                      <div className="max-w-[200px] truncate" title={r.description}>
+                        {r.description}
+                      </div>
+                    </td>
+                    
+                    <td className="px-4 py-2 text-center border-r border-slate-100 whitespace-nowrap">{r.available_stock}</td>
+                    <td className="px-4 py-2 text-center text-red-600 font-medium border-r border-slate-100 whitespace-nowrap">{r.blocked_stock}</td>
+                    <td className="px-4 py-2 text-center border-r border-slate-100 whitespace-nowrap">{r.safety_stock}</td>
+                    
+                    <td className="px-4 py-2 text-center font-extrabold text-slate-600 border-r border-slate-100 whitespace-nowrap">
+                      {r.isManual ? "0.1" : r.x_days}
+                    </td>
+                    
+                    <td className="px-4 py-2 text-center bg-blue-50/20 border-r border-slate-100 whitespace-nowrap">
+                      <div className="flex flex-col items-center justify-center">
+                        <input 
+                          type="number"
+                          value={r.transferred_stock_box}
+                          onChange={(e) => handleEditQty(r.material_id, Number(e.target.value))}
+                          className={`w-20 text-center font-black p-1 border rounded outline-none transition-all ${
+                            r.isManual 
+                              ? "border-blue-300 bg-white text-[#114b79] focus:ring-1 focus:ring-[#114b79]" 
+                              : "border-slate-300 text-slate-800 focus:ring-1 focus:ring-[#114b79]"
+                          }`}
+                        />
+                        <span className="text-[10px] font-bold text-slate-400 mt-1 whitespace-nowrap">
+                          Max: {r.max_transfer_box}
+                        </span>
+                      </div>
+                    </td>
+
+                    <td className="px-4 py-2 text-center whitespace-nowrap">
+                      <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border ${r.statusColor}`}>
                         {r.status}
                       </span>
                     </td>
+                    
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+
         </div>
       )}
 
