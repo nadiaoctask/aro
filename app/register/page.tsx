@@ -30,7 +30,7 @@ export default function RegisterPage() {
 
   return (
       <form onSubmit={handleRegister} className="bg-white p-8 rounded-lg shadow-md w-96 flex flex-col gap-4">
-        <h2 className="text-2xl font-bold text-[#114b79] mb-4">Buat Akun</h2>
+        <h2 className="text-2xl font-bold text-[#114b79] mb-4 text-center" >Buat Akun</h2>
         <input type="text" placeholder="Nama Lengkap" required className="border p-2 rounded" value={name} onChange={e => setName(e.target.value)} />
         <input type="email" placeholder="Email" required className="border p-2 rounded" value={email} onChange={e => setEmail(e.target.value)} />
         <input type="password" placeholder="Password (min 6 char)" required className="border p-2 rounded" value={password} onChange={e => setPassword(e.target.value)} />

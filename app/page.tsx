@@ -165,7 +165,7 @@ export default function Home() {
     return <div className="p-10 text-center font-bold text-[#114b79]">Menyiapkan Dashboard...</div>;
   }
 
-  const isChecker = userRole === "checker";
+  const isChecker = String(userRole).toLowerCase().includes("checker");
 
   return (
     <div className="space-y-6">

@@ -19,6 +19,7 @@ interface CalculatedResult {
   status: string;
   statusColor: string;
   isManual?: boolean;
+  daily_deliv: number;
 }
 
 export default function ReplenishmentPage() {
@@ -95,6 +96,14 @@ export default function ReplenishmentPage() {
   // Pembersih MID: Hapus spasi dan nol di depan agar tidak miss-match
   const cleanMid = (val: any) => String(val || "").replace(/^0+/, '').trim().toUpperCase();
 
+  const roundToHalfPallet = (qty: number, unit: number, maxStock: number) => {
+    if (qty <= 0 || maxStock <= 0) return 0;
+    const rounded = Math.ceil(qty / unit) * unit;
+    return rounded > maxStock ? maxStock : rounded;
+  };
+
+
+  const MAX_COVERAGE_DAYS = 7;
   const handleCalculate = async () => {
     if (!fileZRW29 || !fileZRW12 || !fileSales || !workDays || !replenishDays) {
       alert("Harap lengkapi semua file Excel dan parameter hari!");
@@ -205,10 +214,15 @@ export default function ReplenishmentPage() {
           // Syarat MOQ: Setengah Palet dalam Satuan Box
           const min_transfer_boxes = Math.ceil((pcs_per_pal / pcs_per_box) / 2);
           const maxBoxAvailable = currentStockA002;
+          const needBox = transferQtyBox; // kebutuhan sebelum pembulatan
+            transferQtyBox = roundToHalfPallet(transferQtyBox, min_transfer_boxes, maxBoxAvailable);
 
-          if (transferQtyBox > maxBoxAvailable) {
-            transferQtyBox = maxBoxAvailable;
-          }
+            // Round up bikin coverage > 7 hari: jangan diangkut
+            if (transferQtyBox > needBox && transferQtyBox / dailydeliv > MAX_COVERAGE_DAYS) {
+              transferQtyBox = 0;
+              status = "Kelebihan (>7 Hari)";
+              statusColor = "bg-slate-100 text-slate-600 border border-slate-300";
+            }
           
           outputData.push({
             material_id: mid,
@@ -221,7 +235,8 @@ export default function ReplenishmentPage() {
             max_transfer_box: maxBoxAvailable,
             min_transfer_box_limit: min_transfer_boxes,
             status: status,
-            statusColor: statusColor
+            statusColor: statusColor,
+            daily_deliv: dailydeliv
           });
         }
       });
@@ -305,7 +320,8 @@ export default function ReplenishmentPage() {
           min_transfer_box_limit: manualMinBoxLimit,
           status: "Sesuai Permintaan",
           statusColor: "bg-blue-50 text-[#114b79] border border-blue-200",
-          isManual: true
+          isManual: true,
+          daily_deliv: 0
         }, ...prev];
       }
     });
@@ -315,20 +331,23 @@ export default function ReplenishmentPage() {
   };
 
   const handleTransfer = async () => {
-    const itemsToTransfer = results.filter(item => {
-      if (item.transferred_stock_box <= 0) return false;
-      if (item.isManual) return true;
-      return item.transferred_stock_box >= item.min_transfer_box_limit;
-    });
+    const itemsToTransfer = results
+      .map(item => item.isManual ? item : {
+        ...item,
+        transferred_stock_box: roundToHalfPallet(
+          item.transferred_stock_box, item.min_transfer_box_limit, item.max_transfer_box
+        ),
+      })
+      .filter(item => item.transferred_stock_box > 0);
 
     if (itemsToTransfer.length === 0) {
-      alert("Tidak ada material yang siap ditransfer (Semua Qty 0 atau di bawah MOQ 1/2 Palet).");
+      alert("Tidak ada material yang siap ditransfer (semua Qty 0).");
       return;
     }
 
     const skippedCount = results.length - itemsToTransfer.length;
     if (skippedCount > 0) {
-      const proceed = confirm(`Terdapat ${skippedCount} material yang akan DIABAIKAN karena Qty kurang dari MOQ (1/2 Palet).\n\nLanjut simpan ${itemsToTransfer.length} material valid ke database?`);
+      const proceed = confirm(`Terdapat ${skippedCount} material dengan Qty 0 yang akan DIABAIKAN.\n\nLanjut simpan ${itemsToTransfer.length} material ke database?`);
       if (!proceed) return;
     }
     

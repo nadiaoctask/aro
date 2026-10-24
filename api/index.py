@@ -57,20 +57,22 @@ def optimize_fleet(payload: OptimizeRequest):
         for mid, item in remaining_items.items():
             safe = mid.replace('-', '_').replace(' ', '_')
             rem = item.boxes_needed
-            m = min(half_pallet_boxes(item.pcs_per_pal, item.pcs_per_box), rem)
-            can_split = rem >= 2 * m
+            u = half_pallet_boxes(item.pcs_per_pal, item.pcs_per_box)
+            units = rem // u          # jumlah paket 1/2 palet
+            tail = rem % u            # sisa non-kelipatan (kasus angkut semua stok)
 
-            qty[mid] = make_var(prob, f"q_{safe}", 0, rem)
-            y_full = make_var(prob, f"yfull_{safe}", 0, 1)
-            y_part = make_var(prob, f"ypart_{safe}", 0, 1 if can_split else 0)
+            k = make_var(prob, f"k_{safe}", 0, units)
+            y_tail = make_var(prob, f"ytail_{safe}", 0, 1 if tail > 0 else 0)
+            z = make_var(prob, f"z_{safe}", 0, 1)
 
-            prob += y_full + y_part <= 1
-            prob += qty[mid] >= m * y_part + rem * y_full
-            prob += qty[mid] <= (rem - m) * y_part + rem * y_full
+            prob += k >= units * y_tail   # tail hanya boleh kalau semua unit terangkut
+            prob += z <= k + y_tail
+
+            qty[mid] = u * k + tail * y_tail   # ekspresi, bukan variabel
 
             priority = 100.0 / (item.x_days + 0.1)
             objective_terms.append(priority * qty[mid])
-            objective_terms.append(priority * COVERAGE_WEIGHT * m * (y_full + y_part))
+            objective_terms.append(priority * COVERAGE_WEIGHT * min(u, rem) * z)
 
         prob += pulp.lpSum(objective_terms), "Maximize_Priority_and_Coverage"
 
@@ -84,7 +86,7 @@ def optimize_fleet(payload: OptimizeRequest):
         total_volume = 0.0
         
         for mid, item in remaining_items.items():
-            qty_loaded = int(round(qty[mid].varValue or 0))
+            qty_loaded = int(round(pulp.value(qty[mid]) or 0))
             
             if qty_loaded > 0:
                 item_weight = qty_loaded * item.weight_per_box
