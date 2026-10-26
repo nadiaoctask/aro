@@ -29,6 +29,20 @@ interface SelectedFleet extends Fleet {
   ritase: number;
 }
 
+const makeSheetName = (name: string, used: Set<string>) => {
+  const base = name.replace(/[\\/?*\[\]:]/g, "").slice(0, 31);
+  let final = base;
+  let n = 2;
+  while (used.has(final)) {
+    const suffix = ` (${n++})`;
+    final = base.slice(0, 31 - suffix.length) + suffix;
+  }
+  used.add(final);
+  return final;
+};
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 function OptimasiContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -46,6 +60,7 @@ function OptimasiContent() {
   
   const [optResult, setOptResult] = useState<any>(null);
   const [activeTab, setActiveTab] = useState(0);
+
 
   useEffect(() => {
     if (sessionId) {
@@ -200,92 +215,144 @@ function OptimasiContent() {
     setIsOptimizing(false);
   };
 
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
 const handleSaveTransfer = async () => {
-    if (!optResult || !sessionId) return;
-    setIsSaving(true);
-    
-    try {
-      for (const fleetResult of optResult.optimized_fleets) {
-        const { data: headerData, error: headerErr } = await supabase
-          .from("optimized_fleet")
-          .insert([{
-            id_sesi: sessionId,
-            license_plate: fleetResult.license_plate,
-            ritase: fleetResult.ritase,
-            total_weight: fleetResult.total_weight,
-            total_volume: fleetResult.total_volume,
-            status: "Menunggu Picking"
-          }])
-          .select("id_optimasi")
-          .single();
+  if (!optResult || !sessionId) return;
+  setIsSaving(true);
 
-        if (headerErr) throw headerErr;
-        const newIdOptimasi = headerData.id_optimasi;
+  try {
+    // ===== 1. Simpan ke database =====
+    for (const fleetResult of optResult.optimized_fleets) {
+      const { data: headerData, error: headerErr } = await supabase
+        .from("optimized_fleet")
+        .insert([{
+          id_sesi: sessionId,
+          license_plate: fleetResult.license_plate,
+          ritase: fleetResult.ritase,
+          total_weight: fleetResult.total_weight,
+          total_volume: fleetResult.total_volume,
+          status: "Menunggu Picking"
+        }])
+        .select("id_optimasi")
+        .single();
 
-        const detailPayload = fleetResult.items.map((item: any) => ({
-          id_optimasi: newIdOptimasi,        
-          material_id: item.material_id,
-          qty_transferred: item.qty_loaded_boxes 
-        }));
+      if (headerErr) throw headerErr;
+      const newIdOptimasi = headerData.id_optimasi;
 
-        const { error: detailErr } = await supabase.from("detail_optimasi").insert(detailPayload);
-        if (detailErr) throw detailErr;
-      }
-
-      const summaryMap = new Map();
-      optResult.optimized_fleets.forEach((fleet: any) => {
-        fleet.items.forEach((item: any) => {
-          if (summaryMap.has(item.material_id)) {
-            const existing = summaryMap.get(item.material_id);
-            existing.qty += item.qty_loaded_boxes;
-          } else {
-            summaryMap.set(item.material_id, {
-              material_id: item.material_id,
-              description: item.description,
-              qty: item.qty_loaded_boxes
-            });
-          }
-        });
-      });
-
-      const excelData = Array.from(summaryMap.values()).map(item => ({
-        "Material ID": item.material_id,
-        "Deskripsi": item.description,
-        "Qty (Box)": item.qty
+      const detailPayload = fleetResult.items.map((item: any) => ({
+        id_optimasi: newIdOptimasi,
+        material_id: item.material_id,
+        qty_transferred: item.qty_loaded_boxes
       }));
 
-      if (excelData.length > 0) {
-        const worksheet = XLSX.utils.json_to_sheet(excelData);
-        worksheet["!cols"] = [
-          { wch: 15 }, 
-          { wch: 40 }, 
-          { wch: 25 }  
-        ];
-
-        const workbook = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(workbook, worksheet, "Rekap Transfer");
-        
-        const today = new Date();
-        const dd = String(today.getDate()).padStart(2, '0');
-        const mm = String(today.getMonth() + 1).padStart(2, '0'); // Bulan dimulai dari 0
-        const yyyy = today.getFullYear();
-        const formattedDate = `${dd}${mm}${yyyy}`;
-        
-        XLSX.writeFile(workbook, `Replenishment_${formattedDate}.xlsx`);
-      }
-      
-      setIsSaving(false); 
-      alert("Data berhasil dikirim ke Checker Gudang Sewa!");
-      
-      setTimeout(() => {
-        router.push("/"); 
-      }, 500);
-
-    } catch (err: any) {
-      alert("Gagal menyimpan ke database: " + err.message);
-      setIsSaving(false);
+      const { error: detailErr } = await supabase.from("detail_optimasi").insert(detailPayload);
+      if (detailErr) throw detailErr;
     }
-  };
+
+    // ===== 2. Buat Excel =====
+    const workbook = XLSX.utils.book_new();
+    const usedNames = new Set<string>();
+
+    // Sheet rekap semua fleet
+    const summaryMap = new Map<string, any>();
+    optResult.optimized_fleets.forEach((fleet: any) => {
+      fleet.items.forEach((item: any) => {
+        const ex = summaryMap.get(item.material_id);
+        if (ex) {
+          ex.qty_box += item.qty_loaded_boxes;
+          ex.qty_pallet += item.qty_loaded_pallets;
+        } else {
+          summaryMap.set(item.material_id, {
+            material_id: item.material_id,
+            description: item.description,
+            qty_box: item.qty_loaded_boxes,
+            qty_pallet: item.qty_loaded_pallets,
+          });
+        }
+      });
+    });
+
+    const summaryRows: any[] = Array.from(summaryMap.values()).map(i => ({
+      "Material ID": i.material_id,
+      "Deskripsi": i.description,
+      "Qty (Box)": i.qty_box,
+      "Qty (Palet)": round2(i.qty_pallet),
+    }));
+
+    if (summaryRows.length > 0) {
+      summaryRows.push({
+        "Material ID": "TOTAL",
+        "Deskripsi": "",
+        "Qty (Box)": summaryRows.reduce((s, r) => s + r["Qty (Box)"], 0),
+        "Qty (Palet)": round2(summaryRows.reduce((s, r) => s + r["Qty (Palet)"], 0)),
+      });
+      const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
+      wsSummary["!cols"] = [{ wch: 15 }, { wch: 40 }, { wch: 12 }, { wch: 12 }];
+      XLSX.utils.book_append_sheet(workbook, wsSummary, makeSheetName("Rekap Transfer", usedNames));
+    }
+
+    // Sheet per fleet
+    optResult.optimized_fleets.forEach((fleet: any) => {
+      const rows: any[] = fleet.items.map((item: any) => ({
+        "Material ID": item.material_id,
+        "Deskripsi": item.description,
+        "Qty (Box)": item.qty_loaded_boxes,
+        "Qty (Palet)": item.qty_loaded_pallets,
+        "Berat (kg)": item.weight_subtotal,
+        "Volume": item.volume_subtotal,
+      }));
+
+      rows.push({
+        "Material ID": "TOTAL",
+        "Deskripsi": "",
+        "Qty (Box)": rows.reduce((s, r) => s + r["Qty (Box)"], 0),
+        "Qty (Palet)": round2(rows.reduce((s, r) => s + r["Qty (Palet)"], 0)),
+        "Berat (kg)": fleet.total_weight,
+        "Volume": fleet.total_volume,
+      });
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws["!cols"] = [{ wch: 15 }, { wch: 40 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }];
+      XLSX.utils.book_append_sheet(
+        workbook,
+        ws,
+        makeSheetName(`${fleet.shipp_type} - ${fleet.license_plate}`, usedNames)
+      );
+    });
+
+    // Sheet sisa tidak terangkut
+    if (optResult.unassigned?.items?.length > 0) {
+      const wsLeft = XLSX.utils.json_to_sheet(
+        optResult.unassigned.items.map((item: any) => ({
+          "Material ID": item.material_id,
+          "Deskripsi": item.description,
+          "Sisa Qty (Box)": item.boxes_left,
+          "Sisa Berat (kg)": item.weight_left,
+          "Sisa Volume": item.volume_left,
+        }))
+      );
+      wsLeft["!cols"] = [{ wch: 15 }, { wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 14 }];
+      XLSX.utils.book_append_sheet(workbook, wsLeft, makeSheetName("Sisa Tidak Terangkut", usedNames));
+    }
+
+    if (workbook.SheetNames.length > 0) {
+      const today = new Date();
+      const dd = String(today.getDate()).padStart(2, "0");
+      const mm = String(today.getMonth() + 1).padStart(2, "0");
+      const yyyy = today.getFullYear();
+      XLSX.writeFile(workbook, `Replenishment_${dd}${mm}${yyyy}.xlsx`);
+    }
+
+    setIsSaving(false);
+    alert("Data berhasil dikirim ke Checker Gudang Sewa!");
+    setTimeout(() => router.push("/"), 500);
+
+  } catch (err: any) {
+    alert("Gagal menyimpan ke database: " + err.message);
+    setIsSaving(false);
+  }
+};
 
   if (loadingData) {
     return <div className="p-10 text-center font-bold text-[#114b79]">Memuat Data...</div>;
