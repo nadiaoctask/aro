@@ -9,9 +9,7 @@ interface SafetyStock {
   id_ss?: string; 
   material_id: string;
   safety_stock: number;
-  material?: {
-    description: string;
-  };
+  material?: any;
 }
 
 export default function SafetyStockPage() {
