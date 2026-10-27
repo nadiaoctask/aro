@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://aro-3zqj.onrender.com/$1"
+      "destination": "https://aro-3zqj.onrender.com/api/optimize"
     }
   ]
 }
